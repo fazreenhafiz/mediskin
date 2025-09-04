@@ -9,8 +9,8 @@ import json
 st.set_page_config(page_title="MediSkin – Monkeypox Screening", page_icon="🩺", layout="centered")
 
 # -------------------- PATHS -------------------------        
-DZ_MODEL_PATH = Path / "disease_mnv2.h5"  # final model
-DZ_IDX_JSON   = Path / "disease_class_indices.json"
+DZ_MODEL_PATH = Path("disease_mnv2.h5")  # final model
+DZ_IDX_JSON   = Path("disease_class_indices.json")
 IMG_SIZE = (224, 224)
 
 # -------------------- THEME / STYLES -----------------
@@ -180,6 +180,7 @@ else:
     st.info(TEXT[L]["noimg"])
 
 st.markdown("</div>", unsafe_allow_html=True)
+
 
 
 
