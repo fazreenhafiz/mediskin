@@ -8,7 +8,7 @@ from tensorflow.keras.models import load_model
 
 # ---------- Paths (repo-relative) ----------
 ROOT = Path(__file__).parent
-DZ_MODEL_PATH = ROOT / "disease_mnv2_full.h5"           # FULL model
+DZ_MODEL_PATH = ROOT / "disease_mnv2.h5"           # FULL model
 DZ_IDX_JSON   = ROOT / "disease_class_indices.json"
 IMG_SIZE = (224, 224)
 
@@ -102,3 +102,4 @@ if uploaded:
         st.caption(TEXT[L]["disclaimer"])
 else:
     st.info(TEXT[L]["noimg"])
+
