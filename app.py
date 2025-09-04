@@ -8,8 +8,7 @@ import json
 # -------------------- PAGE CONFIG --------------------
 st.set_page_config(page_title="MediSkin – Monkeypox Screening", page_icon="🩺", layout="centered")
 
-# -------------------- PATHS -------------------------
-MODELS_DIR    = Path("D:\psm2\models")        
+# -------------------- PATHS -------------------------      
 DZ_MODEL_PATH = MODELS_DIR / "disease_mnv2.h5"  # final model
 DZ_IDX_JSON   = MODELS_DIR / "disease_class_indices.json"
 IMG_SIZE = (224, 224)
@@ -181,4 +180,5 @@ else:
     st.info(TEXT[L]["noimg"])
 
 st.markdown("</div>", unsafe_allow_html=True)
+
 
