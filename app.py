@@ -1,38 +1,50 @@
-import streamlit as st
-import numpy as np
-from pathlib import Path
-from PIL import Image
-from tensorflow.keras.models import load_model
 import json
+from pathlib import Path
+
+import numpy as np
+import streamlit as st
+from PIL import Image
 import tensorflow as tf
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 
-
-# -------------------- PAGE CONFIG --------------------
+# =============================================================================
+# Page & constants
+# =============================================================================
 st.set_page_config(page_title="MediSkin – Monkeypox Screening", page_icon="🩺", layout="centered")
 
-# -------------------- PATHS -------------------------        
-DZ_MODEL_PATH = Path("disease_mnv2.h5")  # final model
-DZ_IDX_JSON   = Path("disease_class_indices.json")
+# File locations (relative to repo root)
+IDX_JSON = Path("disease_class_indices.json")
+
+# Preferred export locations (choose one path to commit to your repo)
+SAVEDMODEL_DIR = Path("export/mediskin_savedmodel")      # <---- SavedModel folder
+ARCH_JSON      = Path("export/architecture.json")        # <---- Architecture JSON
+WEIGHTS_H5     = Path("export/mediskin_full.weights.h5") # <---- Full weights
+FULL_H5        = Path("disease_mnv2.h5")                 # <---- Full model .h5 (NOT head-only)
+
 IMG_SIZE = (224, 224)
 
-# -------------------- THEME / STYLES -----------------
+# =============================================================================
+# Styling
+# =============================================================================
 st.markdown(
     """
     <style>
-    .stApp { background-color: #d1dff6; }
-    .main {
+      .stApp { background-color: #d1dff6; }
+      .main {
         background-color: rgba(255,255,255,0.95);
         padding: 2rem; border-radius: 16px; max-width: 860px; margin: auto;
         box-shadow: 0 4px 20px rgba(0,0,0,.25);
-    }
-    .meter { height: 10px; background:#e5e7eb; border-radius:999px; overflow:hidden; }
-    .meter>span { display:block; height:100%; background:#2563eb; }
+      }
+      .meter { height: 10px; background:#e5e7eb; border-radius:999px; overflow:hidden; }
+      .meter>span { display:block; height:100%; background:#2563eb; }
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-# -------------------- TEXT (EN / BM) -----------------
+# =============================================================================
+# Text resources
+# =============================================================================
 TEXT = {
     "en": {
         "title": "🧬 MediSkin – Monkeypox Screening",
@@ -44,8 +56,6 @@ TEXT = {
         "disclaimer": "Disclaimer: This tool provides screening support only. Please consult healthcare professionals for diagnosis.",
         "noimg": "Upload an image to start.",
         "running": "Running inference...",
-        "chat_title": "💬 MediSkin Chatbot (FAQ)",
-        "chat_hint": "Ask about monkeypox "
     },
     "bm": {
         "title": "🧬 MediSkin – Saringan Monkeypox",
@@ -57,125 +67,111 @@ TEXT = {
         "disclaimer": "Penafian: Alat ini hanya sokongan saringan. Sila rujuk profesional kesihatan untuk diagnosis.",
         "noimg": "Muat naik imej untuk bermula.",
         "running": "Model sedang dijalankan...",
-        "chat_title": "💬 MediSkin Chatbot  (FAQ)",
-        "chat_hint": "Ask about monkeypox"
-    }
+    },
 }
 
 ADVICE = {
     "en": {
         "monkeypox": "🛑 Avoid close contact, cover lesions, and seek medical attention immediately.",
         "normal": "✅ No concerning lesion detected. Maintain hygiene and monitor regularly.",
-        "others": "ℹ️ This is not typical of monkeypox. Consider a clinic consultation if the condition persists."
+        "other_disease": "ℹ️ This is not typical of monkeypox. Consider a clinic consultation if the condition persists."
     },
     "bm": {
         "monkeypox": "🛑 Elakkan sentuhan rapat, tutup luka, dan dapatkan rawatan perubatan dengan segera.",
         "normal": "✅ Tiada luka membimbangkan dikesan. Kekalkan kebersihan dan pantau keadaan kulit.",
-        "others": "ℹ️ Ini bukan tipikal monkeypox. Pertimbangkan pergi ke klinik jika keadaan berlarutan."
-    }
+        "other_disease": "ℹ️ Ini bukan tipikal monkeypox. Pertimbangkan pergi ke klinik jika keadaan berlarutan."
+    },
 }
 
-# Nicely display names (optional)
-DISPLAY_NAME = {"other_disease": "Others"}
+DISPLAY_NAME = {"other_disease": "Others"}  # Pretty label in English UI
 
-# -------------------- MODEL LOADING ------------------
+# =============================================================================
+# Helpers
+# =============================================================================
+def _load_labels():
+    if not IDX_JSON.exists():
+        st.error(f"`{IDX_JSON}` not found. Make sure it is committed to the repo.")
+        st.stop()
+    with open(IDX_JSON) as f:
+        idx = json.load(f)  # e.g., {"monkeypox":0, "normal":1, "other_disease":2}
+    labels = [c for c, _ in sorted(idx.items(), key=lambda x: x[1])]
+    return labels
+
+def _load_model_for_inference():
+    """
+    Load the Keras model using one of the supported formats:
+      1) SavedModel folder (export/mediskin_savedmodel/)
+      2) architecture.json + full weights (.weights.h5)
+      3) full single .h5 model (disease_mnv2.h5)
+
+    IMPORTANT: A 'head-only' .h5 will NOT work. You must export either the full model
+    or the architecture JSON + full weights, or a SavedModel folder.
+    """
+    # 1) SavedModel directory
+    if SAVEDMODEL_DIR.exists() and SAVEDMODEL_DIR.is_dir():
+        try:
+            model = tf.keras.models.load_model(SAVEDMODEL_DIR, compile=False)
+            return model
+        except Exception as e:
+            st.warning(f"Found SavedModel at {SAVEDMODEL_DIR} but failed to load: {e}")
+
+    # 2) Architecture JSON + full weights
+    if ARCH_JSON.exists() and WEIGHTS_H5.exists():
+        try:
+            from tensorflow.keras.models import model_from_json
+            with open(ARCH_JSON) as f:
+                model = model_from_json(f.read())
+            model.load_weights(str(WEIGHTS_H5))
+            return model
+        except Exception as e:
+            st.warning(f"Found JSON+weights but failed to load: {e}")
+
+    # 3) Single full .h5 model
+    if FULL_H5.exists():
+        try:
+            # Works only if FULL_H5 is a FULL model (not head-only)
+            model = tf.keras.models.load_model(FULL_H5, compile=False)
+            return model
+        except Exception as e:
+            st.warning(f"Found {FULL_H5} but failed to load as a full model: {e}")
+
+    # If nothing worked:
+    st.error(
+        "No valid model found.\n\n"
+        "Please commit ONE of the following:\n"
+        "1) A SavedModel folder at `export/mediskin_savedmodel/`, OR\n"
+        "2) `export/architecture.json` + `export/mediskin_full.weights.h5`, OR\n"
+        "3) A FULL model H5 at `disease_mnv2.h5` (not just the classifier head)."
+    )
+    st.stop()
+
 @st.cache_resource(show_spinner=True)
 def load_model_and_labels():
-    # 1) read class index JSON first
-    with open(DZ_IDX_JSON) as f:
-        idx = json.load(f)  # e.g. {"monkeypox":0, "normal":1, "other_disease":2}
-    labels = [c for c, _ in sorted(idx.items(), key=lambda x: x[1])]
-    num_classes = len(labels)
-
-    # 2) rebuild the exact inference architecture used at training time
-    #    (MobileNetV2 224x224, no top, global avg pooling -> Dense softmax)
-    inputs = tf.keras.Input(shape=(224, 224, 3))
-    # use MobileNetV2 feature extractor
-    base = tf.keras.applications.MobileNetV2(
-        input_tensor=inputs,
-        include_top=False,
-        weights=None
-    )
-    x = tf.keras.layers.GlobalAveragePooling2D()(base.output)
-    outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="dense")(x)
-    model = tf.keras.Model(inputs, outputs, name="mnv2_classifier")
-
-    # 3) load only weights from the .h5 file (works even when full-model load fails)
-    try:
-        model.load_weights(str(DZ_MODEL_PATH))
-    except Exception as e:
-        st.error(f"Failed to load weights from {DZ_MODEL_PATH}: {e}")
-        st.stop()
-
+    labels = _load_labels()
+    model = _load_model_for_inference()
     return model, labels
 
-
 def prep(img_pil: Image.Image):
-    rgb = img_pil.convert("RGB").resize(IMG_SIZE)
-    x = np.array(rgb).astype("float32") / 255.0
+    """Resize to 224x224 and apply MobileNetV2 preprocessing."""
+    img = img_pil.convert("RGB").resize(IMG_SIZE)
+    x = np.array(img).astype("float32")
+    x = preprocess_input(x)           # MobileNetV2 preprocessing
     return np.expand_dims(x, 0)
 
-
-try:
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.metrics.pairwise import cosine_similarity
-
-    FAQ_PAIRS = [
-    ("what is monkeypox",
-     "Monkeypox is a viral zoonotic disease caused by the monkeypox virus. It can spread from animals to humans and between people."),
-    ("what are symptoms of monkeypox",
-     "Common symptoms include fever, headache, swollen lymph nodes, muscle aches, followed by a skin rash or lesions that may resemble smallpox or chickenpox."),
-    ("how does monkeypox spread",
-     "Monkeypox spreads through close contact with lesions, body fluids, respiratory droplets, or contaminated objects like bedding."),
-    ("is monkeypox dangerous",
-     "Monkeypox is usually self-limiting, lasting 2–4 weeks. Severe cases can occur, especially in children or immunocompromised people."),
-    ("is there a treatment for monkeypox",
-     "There is no specific treatment. Supportive care is given, and smallpox vaccines or antivirals may help in some cases."),
-    ("how to prevent monkeypox",
-     "Prevention includes avoiding close contact with infected individuals, practicing good hand hygiene, and using protective equipment when caring for patients.")
-]
-    _VEC = TfidfVectorizer().fit([q for q, _ in FAQ_PAIRS])
-    _CORP = _VEC.transform([q for q, _ in FAQ_PAIRS])
-
-    def bot_reply(user_text: str) -> str:
-        if not user_text.strip():
-            return "Ask me about monkeypox"
-        q = _VEC.transform([user_text.lower()])
-        sims = cosine_similarity(q, _CORP)[0]
-        i = int(np.argmax(sims))
-        return FAQ_PAIRS[i][1] if sims[i] >= 0.2 else "I’m not sure."
-
-    CHATBOT_AVAILABLE = True
-except Exception:
-    CHATBOT_AVAILABLE = False
-
-# -------------------- APP ----------------------------
+# =============================================================================
+# UI
+# =============================================================================
 lang = st.sidebar.selectbox("Language / Bahasa", ["English", "Bahasa Melayu"], index=0)
 L = "en" if lang.startswith("English") else "bm"
-
-# [CHATBOT] UI
-if CHATBOT_AVAILABLE:
-    st.sidebar.markdown(f"### {TEXT[L]['chat_title']}")
-    if "chat" not in st.session_state:
-        st.session_state.chat = [{"role":"assistant","content":"Hi! " + (TEXT[L]["chat_hint"])}]
-    for m in st.session_state.chat:
-        st.sidebar.chat_message(m["role"]).write(m["content"])
-    user_msg = st.sidebar.chat_input(TEXT[L]["chat_hint"])
-    if user_msg:
-        st.session_state.chat.append({"role":"user","content":user_msg})
-        st.session_state.chat.append({"role":"assistant","content":bot_reply(user_msg)})
-        st.rerun()
-else:
-    st.sidebar.markdown("_FAQ chatbot requires `scikit-learn` (run `pip install scikit-learn`)._")
-
-model, DZ_LABELS = load_model_and_labels()
-DZ_DISPLAY = [DISPLAY_NAME.get(lbl, lbl) for lbl in DZ_LABELS]
 
 st.markdown("<div class='main'>", unsafe_allow_html=True)
 st.title(TEXT[L]["title"])
 st.caption(TEXT[L]["subtitle"])
 
 uploaded = st.file_uploader(TEXT[L]["uploader"], type=["jpg", "jpeg", "png"])
+
+# Load model + labels once
+model, DZ_LABELS = load_model_and_labels()
 
 if uploaded:
     img = Image.open(uploaded)
@@ -187,27 +183,21 @@ if uploaded:
             probs = model.predict(x, verbose=0)[0]
             j = int(np.argmax(probs))
             label_raw = DZ_LABELS[j]
-            label = DISPLAY_NAME.get(label_raw, label_raw)  # show "Others" instead of "other_disease"
-            conf = float(probs[j])  # 0..1
+            label_show = DISPLAY_NAME.get(label_raw, label_raw)
+            conf = float(probs[j])
 
-        # --------- SINGLE RESULT (percent) ---------
         st.subheader(TEXT[L]["result"])
-        st.markdown(f"**{label}** — confidence **{conf*100:.1f}%**")
-        st.markdown(f"<div class='meter'><span style='width:{conf*100:.1f}%'></span></div>", unsafe_allow_html=True)
+        st.markdown(f"**{label_show}** — confidence **{conf*100:.1f}%**")
+        st.markdown(
+            f"<div class='meter'><span style='width:{conf*100:.1f}%'></span></div>",
+            unsafe_allow_html=True
+        )
 
-        # Advice
         st.markdown("---")
         st.subheader(TEXT[L]["advice"])
-        st.info(ADVICE[L].get(label_raw.lower(), "—"))
-
+        st.info(ADVICE[L].get(label_raw, "—"))
         st.caption(TEXT[L]["disclaimer"])
 else:
     st.info(TEXT[L]["noimg"])
 
 st.markdown("</div>", unsafe_allow_html=True)
-
-
-
-
-
-
