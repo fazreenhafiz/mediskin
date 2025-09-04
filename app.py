@@ -4,6 +4,8 @@ from pathlib import Path
 from PIL import Image
 from tensorflow.keras.models import load_model
 import json
+import tensorflow as tf
+
 
 # -------------------- PAGE CONFIG --------------------
 st.set_page_config(page_title="MediSkin – Monkeypox Screening", page_icon="🩺", layout="centered")
@@ -79,11 +81,34 @@ DISPLAY_NAME = {"other_disease": "Others"}
 # -------------------- MODEL LOADING ------------------
 @st.cache_resource(show_spinner=True)
 def load_model_and_labels():
-    model = load_model(str(DZ_MODEL_PATH))
+    # 1) read class index JSON first
     with open(DZ_IDX_JSON) as f:
         idx = json.load(f)  # e.g. {"monkeypox":0, "normal":1, "other_disease":2}
     labels = [c for c, _ in sorted(idx.items(), key=lambda x: x[1])]
+    num_classes = len(labels)
+
+    # 2) rebuild the exact inference architecture used at training time
+    #    (MobileNetV2 224x224, no top, global avg pooling -> Dense softmax)
+    inputs = tf.keras.Input(shape=(224, 224, 3))
+    # use MobileNetV2 feature extractor
+    base = tf.keras.applications.MobileNetV2(
+        input_tensor=inputs,
+        include_top=False,
+        weights=None
+    )
+    x = tf.keras.layers.GlobalAveragePooling2D()(base.output)
+    outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="dense")(x)
+    model = tf.keras.Model(inputs, outputs, name="mnv2_classifier")
+
+    # 3) load only weights from the .h5 file (works even when full-model load fails)
+    try:
+        model.load_weights(str(DZ_MODEL_PATH))
+    except Exception as e:
+        st.error(f"Failed to load weights from {DZ_MODEL_PATH}: {e}")
+        st.stop()
+
     return model, labels
+
 
 def prep(img_pil: Image.Image):
     rgb = img_pil.convert("RGB").resize(IMG_SIZE)
@@ -180,6 +205,7 @@ else:
     st.info(TEXT[L]["noimg"])
 
 st.markdown("</div>", unsafe_allow_html=True)
+
 
 
 
