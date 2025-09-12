@@ -1,26 +1,32 @@
-import streamlit as st
-import numpy as np
-from pathlib import Path
-from PIL import Image
+# app.py — MediSkin (Streamlit)
+import os
 import json
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+import streamlit as st
 import tensorflow as tf
 
 # -------------------------------- PAGE CONFIG
 st.set_page_config(page_title="MediSkin – Monkeypox Screening", page_icon="🩺", layout="centered")
 
-# -------------------------------- PATHS  (files must live in the repo root on Streamlit Cloud)
-DZ_MODEL_PATH = Path("disease_mnv2.h5")              
-DZ_IDX_JSON   = Path("disease_class_indices.json")  
+# -------------------------------- PATHS (repo-root defaults; allow env override)
+DZ_MODEL_PATH = Path(os.getenv("DZ_MODEL_PATH", "disease_mnv2.h5"))
+DZ_IDX_JSON   = Path(os.getenv("DZ_IDX_JSON", "disease_class_indices.json"))
 
 # -------------------------------- THEME
-st.markdown("""
+st.markdown(
+    """
 <style>
 .stApp { background:#d1dff6; }
 .main { background:rgba(255,255,255,.95); padding:2rem; border-radius:16px; max-width:860px; margin:auto; box-shadow:0 4px 20px rgba(0,0,0,.25); }
 .meter { height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; }
 .meter>span { display:block; height:100%; background:#2563eb; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # -------------------- TEXT (EN / BM) -----------------
 TEXT = {
@@ -35,7 +41,7 @@ TEXT = {
         "noimg": "Upload an image to start.",
         "running": "Running inference...",
         "chat_title": "💬 MediSkin Chatbot (FAQ)",
-        "chat_hint": "Ask about monkeypox "
+        "chat_hint": "Ask about monkeypox"
     },
     "bm": {
         "title": "🧬 MediSkin – Saringan Monkeypox",
@@ -48,7 +54,7 @@ TEXT = {
         "noimg": "Muat naik imej untuk bermula.",
         "running": "Model sedang dijalankan...",
         "chat_title": "💬 MediSkin Chatbot  (FAQ)",
-        "chat_hint": "Ask about monkeypox"
+        "chat_hint": "Tanya tentang monkeypox"
     }
 }
 
@@ -64,78 +70,59 @@ ADVICE = {
         "others": "ℹ️ Ini bukan tipikal monkeypox. Pertimbangkan pergi ke klinik jika keadaan berlarutan."
     }
 }
+
+# Show “Others” instead of raw class name (if needed)
 DISPLAY_NAME = {"other_disease": "Others"}
 
-# -------------------------------- MODEL LOADER 
+# -------------------- MODEL LOADING (single, correct) ------------------
+IMG_SIZE = (224, 224)  # expected by your MobileNetV2 model
+
 @st.cache_resource(show_spinner=True)
 def load_model_and_labels():
-    # labels
+    # Load labels (expects {"monkeypox":0, "normal":1, "other_disease":2})
     if not DZ_IDX_JSON.exists():
         st.error(f"Missing file: {DZ_IDX_JSON}")
         st.stop()
-    with open(DZ_IDX_JSON) as f:
+    with open(DZ_IDX_JSON, "r", encoding="utf-8") as f:
         idx = json.load(f)
     labels = [c for c, _ in sorted(idx.items(), key=lambda x: x[1])]
-    num_classes = len(labels)
 
-    # build a SINGLE-input MobileNetV2 graph
-    inp = tf.keras.Input(shape=(224, 224, 3), name="input")
-    backbone = tf.keras.applications.MobileNetV2(include_top=False, weights=None, input_shape=(224,224,3))
-    feats = backbone(inp, training=False)              # <-- single call => single input
-    x = tf.keras.layers.GlobalAveragePooling2D(name="gap")(feats)
-    out = tf.keras.layers.Dense(num_classes, activation="softmax", name="dense")(x)
-    model = tf.keras.Model(inp, out, name="mnv2_classifier")
-
-    # load weights by name ONLY (skip mismatches), never load full model
+    # Load model (full .h5/.keras)
     if not DZ_MODEL_PATH.exists():
-        st.error(f"Model weights not found: {DZ_MODEL_PATH}")
+        st.error(f"Model file not found: {DZ_MODEL_PATH}")
         st.stop()
-    try:
-        model.load_weights(str(DZ_MODEL_PATH), by_name=True, skip_mismatch=True)
-    except Exception as e:
-        st.error(f"Failed to load weights from '{DZ_MODEL_PATH}': {e}")
-        st.stop()
-
+    model = tf.keras.models.load_model(str(DZ_MODEL_PATH))
+    # Optional sanity check
+    if hasattr(model, "outputs") and model.outputs:
+        out_dim = model.outputs[0].shape[-1]
+        if out_dim is not None and int(out_dim) != len(labels):
+            st.warning(f"Label count ({len(labels)}) does not match model output ({int(out_dim)}).")
     return model, labels
 
 def prep(img_pil: Image.Image):
     rgb = img_pil.convert("RGB").resize(IMG_SIZE)
-    x = np.array(rgb).astype("float32") / 255.0
+    x = np.array(rgb, dtype="float32") / 255.0
     return np.expand_dims(x, 0)
 
-# -------------------- MODEL LOADING ------------------
-@st.cache_resource(show_spinner=True)
-def load_model_and_labels():
-    model = load_model(str(DZ_MODEL_PATH))
-    with open(DZ_IDX_JSON) as f:
-        idx = json.load(f)  # e.g. {"monkeypox":0, "normal":1, "other_disease":2}
-    labels = [c for c, _ in sorted(idx.items(), key=lambda x: x[1])]
-    return model, labels
-
-def prep(img_pil: Image.Image):
-    rgb = img_pil.convert("RGB").resize(IMG_SIZE)
-    x = np.array(rgb).astype("float32") / 255.0
-    return np.expand_dims(x, 0)
-
-
+# -------------------- (Optional) Lightweight FAQ chatbot ----------------
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
 
     FAQ_PAIRS = [
-    ("what is monkeypox",
-     "Monkeypox is a viral zoonotic disease caused by the monkeypox virus. It can spread from animals to humans and between people."),
-    ("what are symptoms of monkeypox",
-     "Common symptoms include fever, headache, swollen lymph nodes, muscle aches, followed by a skin rash or lesions that may resemble smallpox or chickenpox."),
-    ("how does monkeypox spread",
-     "Monkeypox spreads through close contact with lesions, body fluids, respiratory droplets, or contaminated objects like bedding."),
-    ("is monkeypox dangerous",
-     "Monkeypox is usually self-limiting, lasting 2–4 weeks. Severe cases can occur, especially in children or immunocompromised people."),
-    ("is there a treatment for monkeypox",
-     "There is no specific treatment. Supportive care is given, and smallpox vaccines or antivirals may help in some cases."),
-    ("how to prevent monkeypox",
-     "Prevention includes avoiding close contact with infected individuals, practicing good hand hygiene, and using protective equipment when caring for patients.")
-]
+        ("what is monkeypox",
+         "Monkeypox is a viral zoonotic disease caused by the monkeypox virus. It can spread from animals to humans and between people."),
+        ("what are symptoms of monkeypox",
+         "Common symptoms include fever, headache, swollen lymph nodes, muscle aches, followed by a skin rash or lesions that may resemble smallpox or chickenpox."),
+        ("how does monkeypox spread",
+         "Monkeypox spreads through close contact with lesions, body fluids, respiratory droplets, or contaminated objects like bedding."),
+        ("is monkeypox dangerous",
+         "Monkeypox is usually self-limiting, lasting 2–4 weeks. Severe cases can occur, especially in children or immunocompromised people."),
+        ("is there a treatment for monkeypox",
+         "There is no specific treatment. Supportive care is given, and smallpox vaccines or antivirals may help in some cases."),
+        ("how to prevent monkeypox",
+         "Prevention includes avoiding close contact with infected individuals, practicing good hand hygiene, and using protective equipment when caring for patients.")
+    ]
     _VEC = TfidfVectorizer().fit([q for q, _ in FAQ_PAIRS])
     _CORP = _VEC.transform([q for q, _ in FAQ_PAIRS])
 
@@ -155,24 +142,26 @@ except Exception:
 lang = st.sidebar.selectbox("Language / Bahasa", ["English", "Bahasa Melayu"], index=0)
 L = "en" if lang.startswith("English") else "bm"
 
-# [CHATBOT] UI
+# Chatbot UI
 if CHATBOT_AVAILABLE:
     st.sidebar.markdown(f"### {TEXT[L]['chat_title']}")
     if "chat" not in st.session_state:
-        st.session_state.chat = [{"role":"assistant","content":"Hi! " + (TEXT[L]["chat_hint"])}]
+        st.session_state.chat = [{"role": "assistant", "content": "Hi! " + TEXT[L]["chat_hint"]}]
     for m in st.session_state.chat:
         st.sidebar.chat_message(m["role"]).write(m["content"])
     user_msg = st.sidebar.chat_input(TEXT[L]["chat_hint"])
     if user_msg:
-        st.session_state.chat.append({"role":"user","content":user_msg})
-        st.session_state.chat.append({"role":"assistant","content":bot_reply(user_msg)})
+        st.session_state.chat.append({"role": "user", "content": user_msg})
+        st.session_state.chat.append({"role": "assistant", "content": bot_reply(user_msg)})
         st.rerun()
 else:
     st.sidebar.markdown("_FAQ chatbot requires `scikit-learn` (run `pip install scikit-learn`)._")
 
+# Load model + labels once
 model, DZ_LABELS = load_model_and_labels()
 DZ_DISPLAY = [DISPLAY_NAME.get(lbl, lbl) for lbl in DZ_LABELS]
 
+# Main UI
 st.markdown("<div class='main'>", unsafe_allow_html=True)
 st.title(TEXT[L]["title"])
 st.caption(TEXT[L]["subtitle"])
@@ -189,13 +178,16 @@ if uploaded:
             probs = model.predict(x, verbose=0)[0]
             j = int(np.argmax(probs))
             label_raw = DZ_LABELS[j]
-            label = DISPLAY_NAME.get(label_raw, label_raw)  # show "Others" instead of "other_disease"
+            label = DISPLAY_NAME.get(label_raw, label_raw)  # prettier name
             conf = float(probs[j])  # 0..1
 
         # --------- SINGLE RESULT (percent) ---------
         st.subheader(TEXT[L]["result"])
         st.markdown(f"**{label}** — confidence **{conf*100:.1f}%**")
-        st.markdown(f"<div class='meter'><span style='width:{conf*100:.1f}%'></span></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='meter'><span style='width:{conf*100:.1f}%'></span></div>",
+            unsafe_allow_html=True,
+        )
 
         # Advice
         st.markdown("---")
