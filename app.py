@@ -1,8 +1,6 @@
 # app.py — MediSkin (Streamlit)
-import os
-import json
+import os, json
 from pathlib import Path
-
 import numpy as np
 from PIL import Image
 import streamlit as st
@@ -12,21 +10,18 @@ import tensorflow as tf
 st.set_page_config(page_title="MediSkin – Monkeypox Screening", page_icon="🩺", layout="centered")
 
 # -------------------------------- PATHS (repo-root defaults; allow env override)
-DZ_MODEL_PATH = Path(os.getenv("DZ_MODEL_PATH", "disease_mnv2.h5"))
-DZ_IDX_JSON   = Path(os.getenv("DZ_IDX_JSON", "disease_class_indices.json"))
+DZ_MODEL_PATH = Path(os.getenv("DZ_MODEL_PATH", "disease_mnv2.h5"))        # weights only
+DZ_IDX_JSON   = Path(os.getenv("DZ_IDX_JSON",  "disease_class_indices.json"))
 
 # -------------------------------- THEME
-st.markdown(
-    """
+st.markdown("""
 <style>
 .stApp { background:#d1dff6; }
 .main { background:rgba(255,255,255,.95); padding:2rem; border-radius:16px; max-width:860px; margin:auto; box-shadow:0 4px 20px rgba(0,0,0,.25); }
 .meter { height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; }
 .meter>span { display:block; height:100%; background:#2563eb; }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
 # -------------------- TEXT (EN / BM) -----------------
 TEXT = {
@@ -71,40 +66,53 @@ ADVICE = {
     }
 }
 
-# Show “Others” instead of raw class name (if needed)
 DISPLAY_NAME = {"other_disease": "Others"}
 
-# -------------------- MODEL LOADING (single, correct) ------------------
-IMG_SIZE = (224, 224)  # expected by your MobileNetV2 model
+# -------------------- MODEL (build clean graph + load weights) ----------
+# Set to the size you trained with; if unsure and you used MobileNetV2 defaults, 224 is typical.
+IMG_SIZE = (224, 224)
 
 @st.cache_resource(show_spinner=True)
 def load_model_and_labels():
-    # Load labels (expects {"monkeypox":0, "normal":1, "other_disease":2})
+    # ---- Load labels
     if not DZ_IDX_JSON.exists():
         st.error(f"Missing file: {DZ_IDX_JSON}")
         st.stop()
     with open(DZ_IDX_JSON, "r", encoding="utf-8") as f:
-        idx = json.load(f)
+        idx = json.load(f)  # e.g. {"monkeypox":0,"normal":1,"other_disease":2}
     labels = [c for c, _ in sorted(idx.items(), key=lambda x: x[1])]
+    num_classes = len(labels)
 
-    # Load model (full .h5/.keras)
+    # ---- Build a SINGLE-input MobileNetV2 classifier
+    inp = tf.keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3), name="input")
+    base = tf.keras.applications.MobileNetV2(
+        include_top=False, weights=None, input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3), name="mnv2"
+    )
+    x = base(inp, training=False)                 # IMPORTANT: call once → one tensor forward
+    x = tf.keras.layers.GlobalAveragePooling2D(name="gap")(x)
+    out = tf.keras.layers.Dense(num_classes, activation="softmax", name="cls")(x)
+    model = tf.keras.Model(inp, out, name="mnv2_classifier")
+
+    # ---- Load weights ONLY (avoid loading a broken graph)
     if not DZ_MODEL_PATH.exists():
-        st.error(f"Model file not found: {DZ_MODEL_PATH}")
+        st.error(f"Model weights not found: {DZ_MODEL_PATH}")
         st.stop()
-    model = tf.keras.models.load_model(str(DZ_MODEL_PATH))
-    # Optional sanity check
-    if hasattr(model, "outputs") and model.outputs:
-        out_dim = model.outputs[0].shape[-1]
-        if out_dim is not None and int(out_dim) != len(labels):
-            st.warning(f"Label count ({len(labels)}) does not match model output ({int(out_dim)}).")
+    try:
+        model.load_weights(str(DZ_MODEL_PATH), by_name=True, skip_mismatch=True)
+    except Exception as e:
+        st.error(f"Failed to load weights from '{DZ_MODEL_PATH}': {e}")
+        st.stop()
+
     return model, labels
 
-def prep(img_pil: Image.Image):
+def preprocess(img_pil: Image.Image):
     rgb = img_pil.convert("RGB").resize(IMG_SIZE)
-    x = np.array(rgb, dtype="float32") / 255.0
+    x = np.array(rgb, dtype="float32")
+    # If you trained with /255, keep this; if you used tf.keras.applications preprocessing, swap accordingly.
+    x = x / 255.0
     return np.expand_dims(x, 0)
 
-# -------------------- (Optional) Lightweight FAQ chatbot ----------------
+# -------------------- Optional chatbot (unchanged) ----------------------
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
@@ -142,7 +150,6 @@ except Exception:
 lang = st.sidebar.selectbox("Language / Bahasa", ["English", "Bahasa Melayu"], index=0)
 L = "en" if lang.startswith("English") else "bm"
 
-# Chatbot UI
 if CHATBOT_AVAILABLE:
     st.sidebar.markdown(f"### {TEXT[L]['chat_title']}")
     if "chat" not in st.session_state:
@@ -157,11 +164,9 @@ if CHATBOT_AVAILABLE:
 else:
     st.sidebar.markdown("_FAQ chatbot requires `scikit-learn` (run `pip install scikit-learn`)._")
 
-# Load model + labels once
 model, DZ_LABELS = load_model_and_labels()
 DZ_DISPLAY = [DISPLAY_NAME.get(lbl, lbl) for lbl in DZ_LABELS]
 
-# Main UI
 st.markdown("<div class='main'>", unsafe_allow_html=True)
 st.title(TEXT[L]["title"])
 st.caption(TEXT[L]["subtitle"])
@@ -174,22 +179,17 @@ if uploaded:
 
     if st.button(TEXT[L]["btn"], type="primary"):
         with st.spinner(TEXT[L]["running"]):
-            x = prep(img)
+            x = preprocess(img)
             probs = model.predict(x, verbose=0)[0]
             j = int(np.argmax(probs))
             label_raw = DZ_LABELS[j]
-            label = DISPLAY_NAME.get(label_raw, label_raw)  # prettier name
-            conf = float(probs[j])  # 0..1
+            label = DISPLAY_NAME.get(label_raw, label_raw)
+            conf = float(probs[j])
 
-        # --------- SINGLE RESULT (percent) ---------
         st.subheader(TEXT[L]["result"])
         st.markdown(f"**{label}** — confidence **{conf*100:.1f}%**")
-        st.markdown(
-            f"<div class='meter'><span style='width:{conf*100:.1f}%'></span></div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"<div class='meter'><span style='width:{conf*100:.1f}%'></span></div>", unsafe_allow_html=True)
 
-        # Advice
         st.markdown("---")
         st.subheader(TEXT[L]["advice"])
         st.info(ADVICE[L].get(label_raw.lower(), "—"))
