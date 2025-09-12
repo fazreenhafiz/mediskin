@@ -175,7 +175,8 @@ uploaded = st.file_uploader(TEXT[L]["uploader"], type=["jpg", "jpeg", "png"])
 
 if uploaded:
     img = Image.open(uploaded)
-    st.image(img, caption="Uploaded Image", use_container_width=True)
+    st.image(img, caption="Uploaded Image", use_column_width=True)
+
 
     if st.button(TEXT[L]["btn"], type="primary"):
         with st.spinner(TEXT[L]["running"]):
@@ -199,3 +200,4 @@ else:
     st.info(TEXT[L]["noimg"])
 
 st.markdown("</div>", unsafe_allow_html=True)
+
